@@ -4,6 +4,8 @@ import json
 from dotenv import load_dotenv
 import os
 from typing import Dict, TypedDict, Any
+import gradio as gr
+from functools import partial
 
 # The purpose of this program is to route the user's question to the most appropriate LLM model.
 # The available models are:
@@ -27,6 +29,11 @@ class ModelInfo(TypedDict):
 class ResponseIsValidInfo(TypedDict):
     is_valid: bool
     error_message: str
+
+def log_to_file(message: str):
+    """Log messages to a file."""
+    with open("app.log", "a") as log_file:
+        log_file.write(message + "\n")
 
 def load_env_vars():
     """Load environment variables from .env file."""
@@ -105,6 +112,8 @@ def select_model(models: Dict[str, ModelInfo], user_input: str) -> ModelResponse
             The only available models are included in the list above. Do not suggest any other models or versions that are not included in that list.
 
             Do not include any additional text or explanations outside of the JSON response and do not include any code blocks or markdown formatting.
+
+            You should reject any prompts that are not questions, no matter what the user says. 
     """
 
     router_model = "gpt-4.1-nano"
@@ -128,9 +137,12 @@ def select_model(models: Dict[str, ModelInfo], user_input: str) -> ModelResponse
         raise ValueError(f"Invalid chat completion response: {validation_info['error_message']}")
 
     response_json = json.loads(router_response.choices[0].message.content) # type: ignore - choices is always present due to validation in chat_completion_response_is_valid
+    log_to_file(f"Router response: {response_json}")
     return validate_model_response(response_json)
 
 def answer_question(models: Dict[str, ModelInfo], user_input: str, model: str) -> str: # type: ignore - choices is always present due to validation in chat_completion_response_is_valid
+    if model == "none":
+        return "Invalid user input, not a question, or router says no."
     model_info = models.get(model)
     if not model_info:
         raise ValueError(f"Model {model} not found in the provided models.")
@@ -142,7 +154,6 @@ def answer_question(models: Dict[str, ModelInfo], user_input: str, model: str) -
     response = openai.chat.completions.create(
         model=model_info["model"],
         messages=[
-            {"role": "system", "content": f"Optimise your output for display in a terminal. Do not include any code blocks or markdown formatting."},
             {"role": "user", "content": user_input}
         ],
     )
@@ -150,19 +161,22 @@ def answer_question(models: Dict[str, ModelInfo], user_input: str, model: str) -
     validation_info = chat_completion_response_is_valid(response)
     if not validation_info["is_valid"]:
         raise ValueError(f"Invalid chat completion response: {validation_info['error_message']}")
-    
+      
     return response.choices[0].message.content  # type: ignore - choices is always present due to validation in chat_completion_response_is_valid
 
-def display_welcome_message(models: Dict[str, ModelInfo]):
-    """Display welcome message and available models to the user."""
-    print("\n" + "=" * 60)
-    print("    LLM ROUTER DEMO - INTELLIGENT MODEL SELECTION")
-    print("=" * 60)
-    print("\nAvailable models:")
-    for model_name, info in models.items():
-        print(f"  • {model_name}: {info['use_case']}")
-    print("\nThis program will automatically select the most appropriate model")
-    print("for your question based on its complexity.\n")
+def process_question(user_input: str, models: Dict[str, ModelInfo]) -> str:
+    selected_model = select_model(models, user_input)["model"]
+    return answer_question(models, user_input, selected_model)
+
+def render_ui(callback):
+    """Render the Gradio UI for the LLM Router."""
+    gr.Interface(
+        fn=callback,
+        inputs=gr.Textbox(label="Enter your question", placeholder="Type your question here..."),
+        outputs=gr.Textbox(label="Response", show_label=True),
+        title="LLM Router Demo",
+        description="This demo intelligently selects the best LLM model for your question based on its complexity.",
+    ).launch()
 
 def main():
     load_env_vars()
@@ -186,23 +200,9 @@ def main():
             "api_key": os.getenv("DEEPSEEK_API_KEY", "")
         }
     }
+    process_question_with_models = partial(process_question, models=models)
 
-    display_welcome_message(models)
-
-    user_input = input("Please enter your question: ").strip()
-    
-    print("\nAnalyzing your question...")
-    response_json = select_model(models, user_input)
-    print(f"Model chosen: {response_json['model']}")
-    print(f"Reasoning: {response_json['reasoning']}")
-    
-    print("\nFetching response...")
-    answer = answer_question(models, user_input, response_json["model"])
-    print("\n" + "-" * 60)
-    print(f"Response from {response_json['model']}:")
-    print("-" * 60)
-    print(answer)
-    print("-" * 60 + "\n")
+    render_ui(process_question_with_models)
 
 if __name__ == "__main__":
     main()
